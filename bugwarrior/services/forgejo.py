@@ -9,19 +9,34 @@ Todo:
     * Add Basic and Bearer auth support
     * Flesh out more features offered by forgejo api
     * Use get_processed_url
+    * Specify page size in pagination
 """
+
+# Design:
+# - Auth is generally separate from issue fetching
+# - Can fetch issues for multiple owners/groups in one config
+# - Custom query allowed
+# - Labels as tags
+# - Filter issues/PRs by assigned/creator/mention/etc.
+# - Include all issues created by user
+# - Include all PRs created by user
+# - Include/exclude all PRs
+# - Prefix project name with owner/group name
+
 from builtins import filter
+from datetime import datetime
 from enum import StrEnum
 from locale import str as locale_str
 import logging
 import re
-import sys
-from typing import Any, Optional, Type, Generator
+from typing import Any, Generator, NamedTuple, Optional, Type
+from urllib.parse import urlsplit
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator, model_validator
 import requests
 from requests.compat import str
 import typing_extensions
+from typing_extensions import Self
 
 from bugwarrior import config
 from bugwarrior.services import Client, Issue, Service
@@ -37,72 +52,192 @@ log = logging.getLogger(__name__)  # pylint: disable-msg=C0103
 # }
 
 
+class RepoName(NamedTuple):
+    owner: str
+    name: str
+
+    @staticmethod
+    def from_tag(tag: str) -> "RepoName":
+        return RepoName(*tag.split('/'))
+
+    def __str__(self) -> str:
+        return f"{self.owner}/{self.name}"
+
+
 class ForgejoUser(BaseModel):
+    """A user as represented by the Forgejo API."""
+
     id: int
-    # username
+    """The internal id number of the user."""
+
     login: str
+    """The login username of the user."""
+
+
+class ForgejoOrganization(BaseModel):
+    id: int
+    name: str
+    full_name: str
+    username: str
+    email: str
+
+
+class ForgejoTeamPermission(StrEnum):
+    none = "none"
+    read = "read"
+    write = "write"
+    admin = "admin"
+    owner = "owner"
+
+
+class ForgejoTeam(BaseModel):
+    id: int
+    description: str
+    includes_all_repositories: bool = False
+    name: str
+    organization: ForgejoOrganization
+    permission: ForgejoTeamPermission
+    units: list[str] = Field(default_factory=list)
+    units_map: dict[str, ForgejoTeamPermission] = Field(default_factory=dict)
 
 
 class ForgejoRepository(BaseModel):
-    # The fields here are not complete and only represent those useful to bugwarrior
+    """
+    A repository as represented by the Forgejo API.
+
+    The fields on this class are not complete and only represent those useful to bugwarrior.
+    """
+
     has_issues: bool
+    """Whether the repo has issues enabled."""
     has_pull_requests: bool
+    """Whether the repo has pull requests enabled."""
     has_projects: bool
+    """Whether the repo has projects enabled."""
     id: int
+    """The internal id number of the repo."""
     name: str
+    """
+    The name of the repo, i.e. the "bar" in "foo/bar".
+    """
     full_name: str
+    """The full name of the repo, including the owner, e.g. "foo/bar"."""
     open_issues_count: int
+    """The number of open issues."""
     open_pr_counter: int
+    """The number of open pull requests."""
     owner: ForgejoUser
+    """The user that owns this repo."""
     private: bool
+    """Whether this repo is marked private."""
     topics: list[str]
+    """The list of topics that this repo is tagged with."""
 
 
 class ForgejoLabel(BaseModel):
+    """A label as represented by the Forgejo API."""
+
     id: int
+    """The internal id of the label."""
     name: str
+    """The user-facing name of the label."""
 
 
 class ForgejoPullRequestMeta(BaseModel):
+    """Extra metadata on a ``ForgejoIssueReal`` if it represents a pull request."""
+
     draft: bool
+    """Whether the pull request is in draft."""
     merged: bool
-    # datetime
-    merged_at: Optional[str] = None
+    """Whether the pull request has been merged."""
+    merged_at: Optional[datetime] = None
+    """The timestamp of when the pull request was merged, if it has been merged."""
 
 
 class ForgejoRepositoryMeta(BaseModel):
+    """Metadata of the associated repository for a ``ForgejoIssueReal``."""
+
     full_name: str
+    """The full name of the repository, e.g. "foo/bar"."""
     id: int
+    """The internal id of the repository."""
     name: str
+    """The name of the repository, i.e. the "bar" in "foo/bar"."""
     owner: str
+    """The owner of the repository, i.e. the "foo" in "foo/bar"."""
 
 
 class ForgejoIssueState(StrEnum):
+    """The possible states an issue can be in."""
+
     All = "all"
+    """Used in queries to indicate that issues of any state should be returned."""
     Closed = "closed"
+    """The issue is closed."""
     Open = "open"
+    """The issue is open."""
 
 
-class ForgejoIssueReal(BaseModel):
-    assignee: Optional[ForgejoUser]
-    assignees: Optional[list[ForgejoUser]]
-    body: str
-    closed_at: str  # datetime
-    created_at: str  # datetime
-    due_date: str  # datetime
+class ForgejoMilestone(BaseModel):
+    closed_at: Optional[datetime] = None
+    closed_issues: int = 0
+    created_at: datetime
+    description: str
+    due_on: Optional[datetime] = None
     id: int
-    labels: list[ForgejoLabel]
-    # milestone: forgejomilestone
-    number: int
-    original_author: str
-    pull_request: Optional[ForgejoPullRequestMeta]
-    repository: ForgejoRepositoryMeta
+    open_issues: int
     state: ForgejoIssueState
     title: str
-    updated_at: str  # datetime
+    updated_at: Optional[datetime] = None
+
+
+class ForgejoIssue(BaseModel):
+    """
+    The representation of an issue in the Forgejo API
+
+    Note that pull requests are also represented as issues, just with the extra ``pull_request``
+    field added.
+    """
+
+    assignee: Optional[ForgejoUser]
+    """The primary user this issue is assigned to."""
+    assignees: Optional[list[ForgejoUser]]
+    """All users this issue is assigned to."""
+    body: str
+    """The body of the initial issue post, not including any comments."""
+    closed_at: Optional[datetime]
+    """The timestamp this issue was closed on, if it is closed."""
+    comments: int
+    created_at: datetime
+    """The timestamp this issue was created."""
+    due_date: Optional[datetime]
+    """The timestamp for when this issue must be resolved."""
+    id: int
+    """The internal id of the issue."""
+    labels: list[ForgejoLabel]
+    """All labels applied to this issue."""
+    milestone: Optional[ForgejoMilestone]
+    number: int
+    """The issue number, as displayed in the UI and issue URL."""
+    original_author: str
+    """TODO."""
+    pull_request: Optional[ForgejoPullRequestMeta]
+    """Extra metadata about the pull request, if this represents a pull request."""
+    repository: ForgejoRepositoryMeta
+    """Extra metadata about the repository this issue belongs to."""
+    state: ForgejoIssueState
+    """The current state of the issue."""
+    title: str
+    """The title of the issue."""
+    updated_at: datetime
+    """The last time this issue was updated."""
+    # TODO: is this when the title/body/tags were last updated? Last commit to a PR? Last comment?
     url: str
+    """The API URL for this issue."""
     html_url: str
+    """The URL for humans to view this issue."""
     user: ForgejoUser
+    """The user that created this issue."""
 
 
 class ForgejoPrBranchInfo(BaseModel):
@@ -116,11 +251,11 @@ class ForgejoPrBranchInfo(BaseModel):
 class ForgejoComment(BaseModel):
     id: int
     body: str
-    created_at: str
+    created_at: datetime
     html_url: str
     issue_url: str
     pull_request_url: str
-    updated_at: str
+    updated_at: datetime
     user: ForgejoUser
 
 
@@ -132,10 +267,10 @@ class ForgejoPullRequest(BaseModel):
     title: str
     body: str
     labels: list[ForgejoLabel]
-    assignee: Optional[ForgejoUser]
-    assignees: Optional[list[ForgejoUser]]
+    assignee: Optional[ForgejoUser] = None
+    assignees: Optional[list[ForgejoUser]] = None
     requested_reviewers: list[ForgejoUser]
-    requested_reviewers_teams: list[ForgejoUser]
+    requested_reviewers_teams: list[ForgejoTeam]
     state: ForgejoIssueState
     draft: bool
     comments: int
@@ -143,47 +278,344 @@ class ForgejoPullRequest(BaseModel):
     html_url: str
     mergeable: bool
     merged: bool
-    merged_at: str
+    merged_at: Optional[datetime] = None
     base: ForgejoPrBranchInfo
+    head: ForgejoPrBranchInfo
 
 
-# TODO: Document this with docstrings
+class ForgejoProcessedIssue(BaseModel):
+    id: int
+    number: int
+    assignees: Optional[list[ForgejoUser]] = None
+    body: str
+    closed_at: Optional[datetime] = None
+    created_at: datetime
+    due_date: Optional[datetime] = None
+    labels: list[ForgejoLabel]
+    milestone: Optional[ForgejoMilestone] = None
+    repository: ForgejoRepositoryMeta
+    state: ForgejoIssueState
+    title: str
+    updated_at: Optional[datetime]
+    api_url: str
+    html_url: str
+    user: ForgejoUser
+    comments: list[ForgejoComment]
+    is_pull_request: bool
+    is_draft_pr: bool
+    pr_review_comments: Optional[list[ForgejoComment]]
+    pr_base_branch: Optional[ForgejoPrBranchInfo]
+    pr_merged_at: Optional[datetime]
+    pr_is_mergeable: Optional[bool]
+    pr_requested_reviewers: list[ForgejoUser]
+    pr_requested_reviewers_teams: list[ForgejoTeam]
+
+    @staticmethod
+    def from_issue(
+        issue: ForgejoIssue, comments: Optional[list[ForgejoComment]]
+    ) -> "ForgejoProcessedIssue":
+        return ForgejoProcessedIssue(
+            id=issue.id,
+            number=issue.number,
+            assignees=issue.assignees,
+            body=issue.body,
+            closed_at=issue.closed_at,
+            created_at=issue.created_at,
+            due_date=issue.due_date,
+            labels=issue.labels,
+            milestone=issue.milestone,
+            repository=issue.repository,
+            state=issue.state,
+            title=issue.title,
+            updated_at=issue.updated_at,
+            api_url=issue.url,
+            html_url=issue.html_url,
+            user=issue.user,
+            comments=comments or [],
+            is_pull_request=False,
+            is_draft_pr=False,
+            pr_review_comments=None,
+            pr_base_branch=None,
+            pr_merged_at=None,
+            pr_is_mergeable=None,
+            pr_requested_reviewers=[],
+            pr_requested_reviewers_teams=[],
+        )
+
+    @staticmethod
+    def from_pull_request(
+        issue: ForgejoIssue,
+        pr: ForgejoPullRequest,
+        comments: list[ForgejoComment],
+        review_comments: list[ForgejoComment],
+    ) -> "ForgejoProcessedIssue":
+        return ForgejoProcessedIssue(
+            id=issue.id,
+            number=issue.number,
+            assignees=issue.assignees,
+            body=issue.body,
+            closed_at=issue.closed_at,
+            created_at=issue.created_at,
+            due_date=issue.due_date,
+            labels=issue.labels,
+            milestone=issue.milestone,
+            repository=issue.repository,
+            state=issue.state,
+            title=issue.title,
+            updated_at=issue.updated_at,
+            api_url=issue.url,
+            html_url=issue.html_url,
+            user=issue.user,
+            comments=comments,
+            is_pull_request=True,
+            is_draft_pr=pr.draft,
+            pr_review_comments=review_comments,
+            pr_base_branch=pr.base,
+            pr_merged_at=pr.merged_at,
+            pr_is_mergeable=pr.mergeable,
+            pr_requested_reviewers=pr.requested_reviewers,
+            pr_requested_reviewers_teams=pr.requested_reviewers_teams,
+        )
+
+    @property
+    def is_merged_pr(self) -> bool:
+        return self.pr_merged_at is not None
+
+    @property
+    def type(self) -> str:
+        return "pull_request" if self.is_pull_request else "issue"
+
+
+INCOMPATIBLE_WITH_QUERY = [
+    "include_user_repos",
+    "include_assigned_issues",
+    "include_created_issues",
+    "include_mentioned_issues",
+    "include_reviewed_issues",
+    "include_review_requested_issues",
+    "filter_pull_requests",
+    "exclude_pull_requests",
+]
+
+
 class ForgejoConfig(config.ServiceConfig):
-    # strictly required
+    """Configuration for forgejo services."""
+
+    # Strictly required.
     service: typing_extensions.Literal['forgejo']
     host: str
-    # Forgejo supports Basic, Bearer, and Token auth
-    # For now, we support only Token auth
-    token: str
-    login: str
+    """The scheme and hostname of the Forgejo instance, e.g. ``https://codeberg.org``."""
+    token: str = Field(..., min_length=1)
+    """
+    The personal access token to use to login.
+
+    Forgejo also supports Basic and Bearer auth, but this implementation does not at this time.
+    """
+    login: str = Field(..., min_length=1)
+    """The username to login as."""
 
     # optional
-    include_assigned_issues: bool = False
-    include_created_issues: bool = False
-    include_mentioned_issues: bool = False
-    include_review_requested_issues: bool = False
-    import_labels_as_tags: bool = True
-    involved_issues: bool = False
-    project_owner_prefix: bool = False
+    # which repos to include/exclude
+    include_user_repos: bool = False
+    """Whether to include all repositories belonging to the authenticated user."""
     include_repos: config.ConfigList = []
+    """
+    A list of repositories to include issues and/or pull requests from, in the form "owner/repo".
+    """
     exclude_repos: config.ConfigList = []
-    label_template: str = '{{label}}'
-    filter_pull_requests: bool = False
-    exclude_pull_requests: bool = False
+    """A list of repositories to exclude when searching for issues, in the form "owner/repo"."""
 
+    # which issues/pull requests to include/exclude
+    issue_urls: config.ConfigList = []
+    """URLs of specific issues to include."""
+    include_involved_issues: bool = False
+    """Include all issues involving the authenticated user in any way."""
+    include_assigned_issues: bool = False
+    """Whether to include all issues assigned to the authenticated user."""
+    include_created_issues: bool = False
+    """Whether to include all issues created by the authenticated user."""
+    include_mentioned_issues: bool = False
+    """Whether to include all issues in which the authenticated user is mentioned."""
+    include_reviewed_issues: bool = False
+    """Whether to include all pull requests previously reviewed by the authenticated user."""
+    include_review_requested_issues: bool = False
+    """
+    Whether to include all pull requests in which review is requested from the authenticated user.
+    """
+    # TODO: What should this default be?
+    filter_pull_requests: bool = False
+    """
+    Whether to apply filters to pull requests on included repos.
+
+    If ``False``, all pull requests on included repos will be turned into tasks.
+    """
+    exclude_pull_requests: bool = False
+    """Whether to exclude all pull requests."""
+    query: Optional[str] = None
+    """
+    A custom query to use for finding issues and pull requests.
+
+    Overrides all issue and pull request boolean flags.
+    """
+
+    # other settings
+    import_labels_as_tags: bool = True
+    """Whether to import Forgejo labels as tags."""
+    project_owner_prefix: bool = False
+    """
+    Whether to prefix the Taskwarrior project name with the repo owner.
+
+    If ``True``, the project name for repo "foo/bar" will look like `foo.bar`.
+    Otherwise, it will be just `bar`.
+    """
+    label_template: str = '{{label}}'
+    """The template for transforming a label value into a tag."""
+    # TODO: double check whether other logic always prefixes with `forgejo_`.
+
+    issue_limit: int = 50
     """
     The maximum number of issues the API may get from the host
     """
-    issue_limit: int = 100
 
     def get(self, key: str, default: Any = None, to_type: Optional[Type] = None) -> Any:
+        """
+        Get a configuration field with optional default and type conversion.
+
+        ``to_type`` must be able to take the raw value in its constructor.
+        """
         try:
-            value = self.config_parser.get(self.service_target, self._get_key(key))
+            value = self.parsed_config_parser.get(
+                self.service_target, self._get_key(key)
+            )
             if to_type:
                 return to_type(value)
             return value
         except Exception:
             return default
+
+    @field_validator('host', mode='after')
+    @classmethod
+    def validate_host(cls, host: str) -> str:
+        parsed = urlsplit(host)
+        if parsed.scheme != "https":
+            raise ValueError(f"{host} should use the \"https\" scheme")
+        if not parsed.hostname:
+            raise ValueError(f"{host} must contain a hostname")
+        return host
+
+    @model_validator(mode='after')
+    def validate_include_exclude_repos(self) -> Self:
+        include = set(self.include_repos)
+        exclude = set(self.exclude_repos)
+        in_both = include & exclude
+        if in_both:
+            raise ValueError(
+                f"one or more repos appear in both include_repos and exclude_repos: {in_both}"
+            )
+        return self
+
+    @model_validator(mode='after')
+    def do_not_allow_other_config_if_query_is_set(self) -> Self:
+        if self.query is None:
+            return self
+
+        incompatible = []
+        for attr in INCOMPATIBLE_WITH_QUERY:
+            if getattr(self, attr, False) is True:
+                incompatible.append(attr)
+
+        if incompatible:
+            non_compat = ', '.join(incompatible)
+            raise ValueError(
+                f"The following configuration items are incompatible with \"query\": {non_compat}"
+            )
+
+        return self
+
+    @model_validator(mode='after')
+    def validate_issue_urls(self) -> Self:
+        for url in self.issue_urls:
+            if not url.startswith(self.host):
+                raise ValueError(
+                    f"issue url {url} is inconsistent with the configured host {self.host}"
+                )
+            parsed = urlsplit(url)
+            split = parsed.path.split('/')
+            if "/api/v1" in parsed.path:
+                expected1 = ["", "api", "v1", "repos", None, None, "issues", None]
+                expected2 = ["", "api", "v1", "repos", None, None, "pulls", None]
+            else:
+                expected1 = ["", None, None, "issues", None]
+                expected2 = ["", None, None, "pulls", None]
+
+            # TODO: remove debug printing
+            print(split)
+            print(expected1)
+            print(expected2)
+            error = ValueError(f"{url} is not a valid issue or pull request url")
+            if len(split) not in (len(expected1), len(expected2)):
+                raise error
+
+            for segment, (first, second) in zip(split, zip(expected1, expected2)):
+                print(f"{segment}, {first}, {second}")
+                if first is None or second is None:
+                    continue
+                if segment not in (first, second):
+                    raise error
+        return self
+
+    def filter_issues(
+        self, issue_tuple: tuple[str, tuple[RepoName, ForgejoIssue]]
+    ) -> bool:
+        if self.query is not None:
+            # Assume the query is correct
+            return True
+
+        # TODO: This unpacking should not be necessary
+        (_url, (_repo_name, issue)) = issue_tuple
+        if issue.url in self.issue_urls or issue.html_url in self.issue_urls:
+            return True
+
+        if self.exclude_pull_requests and issue.pull_request is not None:
+            return False
+
+        if not self.filter_pull_requests and issue.pull_request is not None:
+            return True
+
+        if issue.repository.full_name in self.exclude_repos:
+            return False
+
+        if issue.repository.full_name not in self.include_repos:
+            return False
+
+        if self.include_involved_issues:
+            pass
+
+        if self.include_involved_issues or self.include_assigned_issues:
+            if issue.assignee is not None and issue.assignee.login == self.login:
+                return True
+            if issue.assignees is not None and self.login in map(
+                lambda u: u.login, issue.assignees
+            ):
+                return True
+
+        if self.include_involved_issues or self.include_created_issues:
+            if issue.user.login == self.login:
+                return True
+
+        if self.include_involved_issues or self.include_mentioned_issues:
+            # TODO: how best to determine if user is mentioned?
+            pass
+
+        if self.include_involved_issues or self.include_review_requested_issues:
+            if issue.pull_request is not None and issue.pull_request:
+                # TODO: is this the same as assignee?
+                pass
+
+        if self.include_user_repos and issue.repository.owner == self.login:
+            return True
+
+        return False
 
 
 class ForgejoClient(Client):
@@ -216,66 +648,64 @@ class ForgejoClient(Client):
 
     def _api_url(self, path: str, **context: Any) -> str:
         """Build the full url to the API endpoint"""
-        baseurl: str = 'https://{host}/api/v1'.format(host=self.host)
-        print(baseurl)
-        print(path.format(**context))
+        baseurl: str = '{host}/api/v1'.format(host=self.host)
         return baseurl + path.format(**context)
 
-    # TODO Modify these for forgejo support
     def get_repos(self, username: str) -> list[ForgejoRepository]:
-        # user_repos = self._getter(self._api_url("/user/repos?per_page=100"))
-        public_repos = self._get_all_paginated(
+        return self._get_all_paginated(
             self._api_url('/users/{username}/repos', username=username),
             ForgejoRepository,
         )
-        return public_repos
 
-    def get_query(self, query: str) -> list[ForgejoIssueReal]:
+    def get_query(self, query: str) -> list[ForgejoIssue]:
         """Run a generic issue/PR query"""
-        url = self._api_url('/search/issues?q={query}&per_page=100', query=query)
-        return self._get_all_paginated(url, ForgejoIssueReal, subkey='items')
+        # https://codeberg.org/api/swagger#/issue/issueSearchIssues
+        url = self._api_url('/search/issues?q={query}', query=query)
+        return self._get_all_paginated(url, ForgejoIssue)
 
-    def get_issues(self, username: str, repo: str) -> list[ForgejoIssueReal]:
+    def get_issues_for_repo(self, repo: RepoName) -> list[ForgejoIssue]:
         url = self._api_url(
-            '/repos/{username}/{repo}/issues?per_page=100', username=username, repo=repo
+            '/repos/{username}/{repo}/issues', username=repo.owner, repo=repo.name
         )
-        return self._get_all_paginated(url, ForgejoIssueReal)
+        return self._get_all_paginated(url, ForgejoIssue)
 
-    def get_special_issues(self, username: str, query: str) -> list[ForgejoIssueReal]:
+    def get_issues_by_query(self, query: str) -> list[ForgejoIssue]:
         """Returns all issues assigned to authenticated user given a specific query.
 
         This will return all issues this authenticated user has access to and then
         filter the issues with the query that the user supplied.
         """
+        # https://codeberg.org/api/swagger#/issue/issueSearchIssues
         logging.info("Querying /repos/issues/search with query: " + query)
-        url = self._api_url(
-            '/repos/issues/search?{query}', username=username, query=query
-        )
-        return self._get_all_paginated(url, ForgejoIssueReal)
+        url = self._api_url('/repos/issues/search?{query}', query=query)
+        return self._get_all_paginated(url, ForgejoIssue)
 
     # TODO close to forgejo format: /comments/{id}
-    def get_comments(self, username: str, repo: str, number: int) -> list[ForgejoComment]:
+    def get_comments(self, repo: RepoName, number: int) -> list[ForgejoComment]:
         url = self._api_url(
-            '/repos/{username}/{repo}/issues/{number}/comments?per_page=100',
-            username=username,
-            repo=repo,
+            '/repos/{username}/{repo}/issues/{number}/comments',
+            username=repo.owner,
+            repo=repo.name,
             number=number,
         )
         return self._get_all_paginated(url, ForgejoComment)
 
-    def get_pulls(self, username: str, repo: str) -> list[ForgejoPullRequest]:
+    def get_pulls(self, repo: RepoName) -> list[ForgejoPullRequest]:
         url = self._api_url(
-            '/repos/{username}/{repo}/pulls?per_page=100', username=username, repo=repo
+            '/repos/{username}/{repo}/pulls', username=repo.owner, repo=repo.name
         )
         return self._get_all_paginated(url, ForgejoPullRequest)
 
-    def _get_all_paginated(self, url: str, type: Type, subkey: Optional[str] = None) -> list[Any]:
+    def _get_all_paginated(
+        self, url: str, type: Type, subkey: Optional[str] = None
+    ) -> list[Any]:
         """Pagination utility.  Obnoxious."""
 
         kwargs = {}
 
         results = []
         link = dict(next=url)
+        total_expected = 0
 
         while 'next' in link:
             response = self.session.get(link['next'], **kwargs)
@@ -291,12 +721,15 @@ class ForgejoClient(Client):
                     'access\' rights.'
                 )
 
-            json_res = self.json_response(response)
+            json_res: list[Any] = self.json_response(response)
 
             if subkey is not None:
-                json_res = json_res[subkey]
+                json_res = [obj[subkey] for obj in json_res]
 
             results += map(lambda x: type(**x), json_res)
+
+            if total_expected < 1 and "x-total-count" in response.headers:
+                total_expected = int(response.headers.get("x-total-count", "0"))
 
             link = self._link_field_to_dict(response.headers.get('link', None))
 
@@ -307,6 +740,12 @@ class ForgejoClient(Client):
     def _link_field_to_dict(field: Optional[str]) -> dict[str, str]:
         """Utility for ripping apart forgejo's Link header field.
         It's kind of ugly.
+
+        Example headers (gotten using limit=7):
+        x-total-count: 16
+        link: <https://codeberg.org/api/v1/users/USER/repos?limit=7&page=2>; rel="next",<https://codeberg.org/api/v1/users/USER/repos?limit=7&page=3>; rel="last"
+
+        Possible keys are first, prev, next, last
         """
 
         if not field:
@@ -320,7 +759,7 @@ class ForgejoClient(Client):
         )
 
 
-class ForgejoIssue(Issue):
+class ForgejoIssueImpl(Issue):
     TITLE = 'forgejotitle'
     BODY = 'forgejobody'
     DRAFT = 'forgejodraft'
@@ -354,29 +793,33 @@ class ForgejoIssue(Issue):
         STATE: {'type': 'string', 'label': 'Forgejo State'},
     }
 
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.parsed = ForgejoProcessedIssue(**self.record)
+
     @staticmethod
     def _normalize_label_to_tag(label: str) -> str:
         return re.sub(r'[^a-zA-Z0-9]', '_', label)
 
     def get_tags(self) -> list[str]:
-        labels = [label['name'] for label in self.record.get('labels', [])]
+        labels = [label.name for label in self.parsed.labels]
         return self.get_tags_from_labels(labels)
 
     def to_taskwarrior(self) -> dict:
-        milestone = self.record['milestone']
-        if milestone:
-            milestone = milestone['title']
+        milestone = self.parsed.milestone
+        if milestone is not None:
+            milestone = milestone.title
 
-        body = self.record['body']
+        body = self.parsed.body
         if body:
-            body = body.replace('\r\n', '\n')
+            body = body.replace('\r\n', '\n').strip()
 
         if len(body) < 1:
             body = "No annotation was provided."
 
-        created = self.parse_date(self.record.get('created_at'))
-        updated = self.parse_date(self.record.get('updated_at'))
-        closed = self.parse_date(self.record.get('closed_at'))
+        created = self.parsed.created_at
+        updated = self.parsed.updated_at
+        closed = self.parsed.closed_at
 
         return {
             'project': self.extra['project'],
@@ -385,31 +828,28 @@ class ForgejoIssue(Issue):
             'tags': self.get_tags(),
             'entry': created,
             'end': closed,
-            self.DRAFT: self.record.get('draft', 0),
-            self.URL: self.record['html_url'],
-            self.REPO: self.record['repository']['full_name'],
-            self.TYPE: self.extra['type'],
-            self.USER: self.record['user']['login'],
-            self.TITLE: self.record['title'],
+            self.DRAFT: 1 if self.parsed.is_draft_pr else 0,
+            self.URL: self.parsed.html_url,
+            self.REPO: self.parsed.repository.full_name,
+            self.TYPE: self.parsed.type,
+            self.USER: self.parsed.user.login,
+            self.TITLE: self.parsed.title,
             self.BODY: body,
             self.MILESTONE: milestone,
-            self.NUMBER: self.record['number'],
+            self.NUMBER: self.parsed.number,
             self.CREATED_AT: created,
             self.UPDATED_AT: updated,
             self.CLOSED_AT: closed,
-            self.NAMESPACE: self.record['repository'][
-                'owner'
-            ],  # self.extra['namespace'],
-            self.STATE: self.record.get('state', ''),
+            self.NAMESPACE: self.parsed.repository.owner,  # self.extra['namespace'],
+            self.STATE: self.parsed.state,
         }
 
     def get_default_description(self) -> str:
-        log.info('In get_default_description')
         return self.build_default_description(
-            title=self.record['title'],
-            url=self.record['html_url'],
-            number=self.record['number'],
-            cls=self.extra['type'],
+            title=self.parsed.title,
+            url=self.parsed.html_url,
+            number=self.parsed.number,
+            cls=self.parsed.type,
         )
 
 
@@ -421,52 +861,42 @@ class ForgejoService(Service):
 
     def __init__(self, *args: Any, **kw: Any) -> None:
         super(ForgejoService, self).__init__(*args, **kw)
+        self.parsed_config = ForgejoConfig(**self.config.model_dump())
 
-        print(self.config.token)
-        token = self.config.token
-        if token is None:
-            # Probably should be called by validate_config
-            logging.critical("ERROR! No token was provided in config!")
-            sys.exit(1)
+        token = self.get_secret("token", self.parsed_config.login)
+        self.client = ForgejoClient(host=self.parsed_config.host, token=token)
 
-        token = self.get_secret("token", self.config.login)
-
-        # TODO: document these with docstrings
-        self.client = ForgejoClient(host=self.config.host, token=token)
-
-        self.query = self.config.get(
+        self.query = self.parsed_config.get(
             'query',
-            default='involves:{user} state:open'.format(user=self.config.login)
-            if self.config.involved_issues
+            default='involves:{user} state:open'.format(user=self.parsed_config.login)
+            if self.parsed_config.include_involved_issues
             else '',
             to_type=str,
         )
 
     @staticmethod
     def get_keyring_service(service_config: ForgejoConfig) -> str:
-        # TODO grok this
         username = service_config.login
         host = service_config.host
-        return 'forgejo://{username}@{host}/{username}'.format(
-            username=username, host=host
-        )
+        return 'forgejo://{username}@{host}'.format(username=username, host=host)
 
     def get_service_metadata(self) -> dict[str, Any]:
         return {
-            'import_labels_as_tags': self.config.import_labels_as_tags,
-            'label_template': self.config.label_template,
+            'import_labels_as_tags': self.parsed_config.import_labels_as_tags,
+            'label_template': self.parsed_config.label_template,
         }
 
-    def get_owned_repo_issues(self, tag: str) -> dict[str, tuple[str, ForgejoIssueReal]]:
+    def get_owned_repo_issues(
+        self, repo: RepoName
+    ) -> dict[str, tuple[RepoName, ForgejoIssue]]:
         """Grab all the issues"""
         issues = {}
-        for issue in self.client.get_issues(*tag.split('/')):
-            issues[issue.url] = (tag, issue)
+        for issue in self.client.get_issues_for_repo(repo):
+            issues[issue.url] = (repo, issue)
         return issues
 
-    def get_query(self, query: str) -> dict[str, tuple[str, ForgejoIssueReal]]:
+    def get_query(self, query: str) -> dict[str, tuple[RepoName, ForgejoIssue]]:
         """Grab all issues matching a forgejo query"""
-        log.info('In get_query')
         issues = {}
         for issue in self.client.get_query(query):
             url = issue.url
@@ -478,46 +908,45 @@ class ForgejoService(Service):
                 issues[url] = (repo, issue)
         return issues
 
-    def get_special_issues(self, username: str, query: str) -> dict[str, tuple[str, ForgejoIssueReal]]:
+    def get_special_issues(
+        self, query: str
+    ) -> dict[str, tuple[RepoName, ForgejoIssue]]:
         issues = {}
-        for issue in self.client.get_special_issues(username, query):
-            repos = self.get_repository_from_issue(issue)
-            issues[issue.url] = (repos, issue)
+        for issue in self.client.get_issues_by_query(query):
+            repo = self.get_repository_from_issue(issue)
+            issues[issue.url] = (repo, issue)
         return issues
 
     @classmethod
-    def get_repository_from_issue(cls, issue: ForgejoIssueReal | ForgejoPullRequest) -> str:
-        # TODO: this strips the last two segments from
-        # https://codeberg.org/user/repo/issues/1 into
-        # https://codeberg.org/user/repo
-        #
-        # We could also do something like `https://{host}/{issue.repository.full_name}`
-        # but we don't necessarily know the scheme to use.
-        return issue.html_url.rsplit("/", 2)[0]
+    def get_repository_from_issue(
+        cls, issue: ForgejoIssue | ForgejoPullRequest
+    ) -> RepoName:
+        parsed = urlsplit(issue.html_url)
+        segments = parsed.path.split('/')
+        # First segment is "" from the leading slash
+        return RepoName(owner=segments[1], name=segments[2])
 
-    def _comments(self, tag: str, number: int) -> list[ForgejoComment]:
-        user, repo = tag.split('/')
-        return self.client.get_comments(user, repo, number)
+    def _comments(self, repo: RepoName, number: int) -> list[ForgejoComment]:
+        return self.client.get_comments(repo, number)
 
-    def annotations(self, full_name: str, issue: ForgejoIssueReal) -> list[str]:
-        log.info('in Annotations')
-        # log.info(repr(issue))
-        log.info('body: {}'.format(issue.body))
+    def annotations(self, repo: RepoName, issue: ForgejoIssue) -> list[str]:
         url = issue.html_url
         annotations = []
-        if self.config.annotation_comments:
-            comments = self._comments(full_name, issue.number)
-            # log.info(" got comments for %s", issue.url)
+        if self.parsed_config.annotation_comments:
+            comments = self._comments(repo, issue.number)
             annotations = ((c.user.login, c.body) for c in comments)
         annotations_result = self.build_annotations(annotations, url)
         log.info('annotations: {}'.format(annotations_result))
         return annotations_result
 
-    def _reqs(self, full_name: str) -> list[tuple[str, ForgejoPullRequest]]:
+    def _get_pull_requests(
+        self, repo: RepoName
+    ) -> list[tuple[RepoName, ForgejoPullRequest]]:
         """Grab all the pull requests"""
-        return [(full_name, i) for i in self.client.get_pulls(*full_name.split('/'))]
+        return [(repo, i) for i in self.client.get_pulls(repo)]
 
-    def get_owner(self, issue: tuple[str, ForgejoIssueReal]) -> str:
+    def get_owner(self, issue: tuple[RepoName, ForgejoIssue]) -> str:
+        # TODO: verify
         if issue[1].assignee:
             return issue[1].assignee.login
         return issue[1].user.login
@@ -526,118 +955,154 @@ class ForgejoService(Service):
         return self.filter_repo_name(repo.full_name)
 
     def filter_repos(self, repo: ForgejoRepository) -> bool:
-        if repo.owner != self.config.login:
-            return False
-
         return self.filter_repo_name(repo.full_name)
 
     def filter_repo_name(self, full_name: str) -> bool:
-        if self.config.exclude_repos:
-            if full_name in self.config.exclude_repos:
+        if self.parsed_config.exclude_repos:
+            if full_name in self.parsed_config.exclude_repos:
                 return False
 
-        if self.config.include_repos:
-            if full_name in self.config.include_repos:
+        if self.parsed_config.include_repos:
+            if full_name in self.parsed_config.include_repos:
                 return True
             else:
                 return False
 
         return True
 
-    def include(self, issue: tuple[str, ForgejoIssueReal]) -> bool:
+    def include_issue(self, issue: tuple[RepoName, ForgejoIssue]) -> bool:
         if issue[1].pull_request is not None:
-            if self.config.exclude_pull_requests:
+            if self.parsed_config.exclude_pull_requests:
                 return False
-            if not self.config.filter_pull_requests:
+            if not self.parsed_config.filter_pull_requests:
                 return True
-        return super(ForgejoService, self).include(issue)
+        return self.parsed_config.filter_issues((issue[1].html_url, issue))
 
-    def issues(self) -> Generator[ForgejoIssue]:
+    def _issue_from_url(self, url: str) -> tuple[str, RepoName, ForgejoIssue]:
+        # Allow users to provide the issue's API url
+        # If they provide the user/HTML url, convert it to the API url
+        if "/api/v1" not in url:
+            path = url.removeprefix(self.parsed_config.host)
+            assert not path.startswith("http")
+            segments = iter(path.split('/'))
+            owner = next(segments)
+            if owner == "":
+                owner = next(segments)
+            name = next(segments)
+            _ = next(segments)
+            number = next(segments)
+            url = (
+                f"{self.parsed_config.host}/api/v1/repos/{owner}/{name}/issues/{number}"
+            )
+
+        resp = self.client.session.get(url)
+        json = self.client.json_response(resp)
+        issue = ForgejoIssue(**json)
+        repo = RepoName(owner=issue.repository.owner, name=issue.repository.name)
+        return (url, repo, issue)
+
+    def _get_issues(self) -> dict[str, tuple[RepoName, ForgejoIssue]]:
         issues = {}
+
+        for url in self.parsed_config.issue_urls:
+            (url, repo, issue) = self._issue_from_url(url)
+            issues[url] = (repo, issue)
+
+        # query overrides all other options
         if self.query:
             issues.update(self.get_query(self.query))
+            return issues
 
-        if self.config.get('include_user_repos', True, bool):
-            # Only query for all repos if an explicit
-            # include_repos list is not specified.
-            if self.config.include_repos:
-                repos: list[str] = self.config.include_repos
-            else:
-                all_repos = self.client.get_repos(self.config.login)
-                repos = filter(self.filter_repos, all_repos)
-                repos = [repo.name for repo in repos]
+        # Only query for all repos if an explicit
+        # include_repos list is not specified.
+        repos = []
+        if self.parsed_config.include_repos:
+            repos: list[str] = self.parsed_config.include_repos
+        elif self.parsed_config.include_user_repos:
+            all_repos = self.client.get_repos(self.parsed_config.login)
+            repos = list(filter(self.filter_repos, all_repos))
+            repos = [repo.full_name for repo in repos]
 
-            for repo in repos:
-                log.info('Found repo: {}'.format(repo))
-                issues.update(self.get_owned_repo_issues(self.config.login + '/' + repo))
+        for repo in repos:
+            log.info('Found repo: {}'.format(repo))
+            issues.update(self.get_owned_repo_issues(RepoName.from_tag(repo)))
 
-            '''
-            A variable used to represent the attachable HTTP query that can be attached to the /repos/issues/search API end.
+        '''
+        A variable used to represent the attachable HTTP query that can be attached to the
+        /repos/issues/search API end.
 
-            if httpQuery is set to "review_requested=True?mentioned=True" for example, then the /repos/issues/search API end will be told to search for all issues where a review is requested AND where the user is mentioned.
-            '''
-            httpQuery = "limit=" + locale_str(self.config.issue_limit) + "&"
+        if httpQuery is set to "review_requested=True?mentioned=True" for example, then the
+        /repos/issues/search API end will be told to search for all issues where a review is
+        requested AND where the user is mentioned.
+        '''
+        httpQuery = "limit=" + locale_str(self.parsed_config.issue_limit) + "&"
 
-            if self.config.get('include_assigned_issues', True, bool):
-                log.info("assigned was true")
-                issues.update(
-                    filter(
-                        self.config.filter_issues,
-                        self.get_special_issues(
-                            self.config.login, httpQuery + "assigned=true&"
-                        ).items(),
-                    )
+        # TODO: seems like query uses implicit OR, so this could maybe all be combined into a single
+        # query
+
+        if self.parsed_config.include_assigned_issues:
+            log.info("assigned was true")
+            issues.update(
+                filter(
+                    self.parsed_config.filter_issues,
+                    self.get_special_issues(httpQuery + "assigned=true&").items(),
                 )
-            if self.config.get('include_created_issues', True, bool):
-                log.info("created was true")
-                issues.update(
-                    filter(
-                        self.config.filter_issues,
-                        self.get_special_issues(
-                            self.config.login, httpQuery + "created=true&"
-                        ).items(),
-                    )
+            )
+        if self.parsed_config.include_created_issues:
+            log.info("created was true")
+            issues.update(
+                filter(
+                    self.parsed_config.filter_issues,
+                    self.get_special_issues(httpQuery + "created=true&").items(),
                 )
-            if self.config.get('include_mentioned_issues', True, bool):
-                log.info("mentioned was true")
-                issues.update(
-                    filter(
-                        self.config.filter_issues,
-                        self.get_special_issues(
-                            self.config.login, httpQuery + "mentioned=true&"
-                        ).items(),
-                    )
+            )
+        if self.parsed_config.include_mentioned_issues:
+            log.info("mentioned was true")
+            issues.update(
+                filter(
+                    self.parsed_config.filter_issues,
+                    self.get_special_issues(httpQuery + "mentioned=true&").items(),
                 )
-            if self.config.get('include_review_requested_issues', True, bool):
-                log.info("review request was true")
-                issues.update(
-                    filter(
-                        self.config.filter_issues,
-                        self.get_special_issues(
-                            self.config.login, httpQuery + "review_requested=true&"
-                        ).items(),
-                    )
-                )
+            )
 
-        log.info(' Found %i issues.', len(issues))  # these were debug logs
-        issues = list(filter(self.include, issues.values()))
-        log.info(' Pruned down to %i issues.', len(issues))  # these were debug logs
+        if self.parsed_config.include_review_requested_issues:
+            log.info("review request was true")
+            issues.update(
+                filter(
+                    self.parsed_config.filter_issues,
+                    self.get_special_issues(
+                        httpQuery + "review_requested=true&"
+                    ).items(),
+                )
+            )
+        if self.parsed_config.include_reviewed_issues:
+            log.info("review request was true")
+            issues.update(
+                filter(
+                    self.parsed_config.filter_issues,
+                    self.get_special_issues(httpQuery + "reviewed=true&").items(),
+                )
+            )
 
-        for tag, issue in issues:
-            # Stuff this value into the upstream dict for:
-            # https://forgejo.com/ralphbean/bugwarrior/issues/159
+        return issues
+
+    def issues(self) -> Generator[ForgejoIssue]:
+        issues = self._get_issues()
+
+        issues = list(filter(self.include_issue, issues.values()))
+
+        for _repo, issue in issues:
             projectName = issue.repository.name
 
             issue_obj = self.get_issue_for_record(issue.model_dump())
-            if self.config.project_owner_prefix:
+            if self.parsed_config.project_owner_prefix:
                 projectName = issue.repository.owner + '.' + projectName
             extra = {
                 'project': projectName,
                 'type': 'pull_request' if 'pull_request' in issue else 'issue',
-                'annotations': [
-                    "#" + locale_str(issue.number) + " - " + issue.title
-                ],
-                'namespace': self.config.login,
+                'annotations': ["#" + locale_str(issue.number) + " - " + issue.title],
+                # TODO: user login or repo owner?
+                'namespace': self.parsed_config.login,
             }
             issue_obj.extra.update(extra)
             yield issue_obj
