@@ -1,5 +1,4 @@
-from datetime import datetime, timedelta, timezone
-from typing import Optional
+from datetime import UTC, datetime, timedelta
 
 import pytest
 import responses
@@ -8,7 +7,6 @@ from bugwarrior.services.forgejo import (
     INCOMPATIBLE_WITH_QUERY,
     ForgejoClient,
     ForgejoComment,
-    ForgejoConfig,
     ForgejoIssue,
     ForgejoLabel,
     ForgejoOrganization,
@@ -24,18 +22,23 @@ from bugwarrior.services.forgejo import (
     RepoName,
 )
 
-from .base import ConfigTest, ServiceIssueTest, ServiceTest
+from ..base import validate
 
-ARBITRARY_CLOSED = (datetime.now(timezone.utc) - timedelta(minutes=30)).replace(
-    microsecond=0
-)
-ARBITRARY_CREATED = (datetime.now(timezone.utc) - timedelta(hours=1)).replace(
-    microsecond=0
-)
-ARBITRARY_DUE = (datetime.now(timezone.utc) + timedelta(days=1)).replace(microsecond=0)
-ARBITRARY_UPDATED = datetime.now(timezone.utc).replace(microsecond=0)
+ARBITRARY_CLOSED = (datetime.now(UTC) - timedelta(minutes=30)).replace(microsecond=0)
+ARBITRARY_CREATED = (datetime.now(UTC) - timedelta(hours=1)).replace(microsecond=0)
+ARBITRARY_DUE = (datetime.now(UTC) + timedelta(days=1)).replace(microsecond=0)
+ARBITRARY_UPDATED = datetime.now(UTC).replace(microsecond=0)
 
 NEXT_ID = 0
+
+SERVICE_CLASS = ForgejoService
+SERVICE_NAME: str = "myforgejo"
+SERVICE_CONFIG = {
+    "service": "forgejo",
+    "login": "tintin",
+    "token": "t0ps3cr3t",
+    "host": "https://codeberg.org",
+}
 
 
 def next_id() -> int:
@@ -49,51 +52,51 @@ def make_issue(
     host: str = "https://codeberg.org",
     user: dict | ForgejoUser,
     repository: dict | ForgejoRepositoryMeta,
-    labels: Optional[list[dict]] = None,
+    labels: list[dict] | None = None,
     is_pr: bool = False,
     **kwargs,
 ) -> ForgejoIssue:
-    id = kwargs.get('id') or next_id()
-    repo_issue_number = kwargs.get('number') or next_id()
+    id = kwargs.get("id") or next_id()
+    repo_issue_number = kwargs.get("number") or next_id()
 
     url_slug = "pulls" if is_pr else "issues"
     pull_request = None
 
     if is_pr:
         pull_request = {
-            'merged': False,
-            'merged_at': None,
-            'draft': False,
-            'html_url': f"{host}/{repository.full_name}/{url_slug}/{repo_issue_number}",
+            "merged": False,
+            "merged_at": None,
+            "draft": False,
+            "html_url": f"{host}/{repository.full_name}/{url_slug}/{repo_issue_number}",
         }
     return ForgejoIssue.model_validate(
         {
-            'id': id,
-            'url': f"{host}/api/v1/repos/{repository.full_name}/{url_slug}/{repo_issue_number}",
-            'html_url': f"{host}/{repository.full_name}/{url_slug}/{repo_issue_number}",
-            'number': repo_issue_number,
-            'user': user,
+            "id": id,
+            "url": f"{host}/api/v1/repos/{repository.full_name}/{url_slug}/{repo_issue_number}",
+            "html_url": f"{host}/{repository.full_name}/{url_slug}/{repo_issue_number}",
+            "number": repo_issue_number,
+            "user": user,
             # These are empty for non-pull-request issues
-            'original_author': "",
-            'original_author_id': 0,
-            'title': 'Example issue',
-            'body': 'This is the body of the issue',
-            'ref': '',
-            'assets': [],
-            'labels': labels or [],
-            'milestone': None,
-            'assignee': None,
-            'assignees': None,
-            'state': 'open',
-            'is_locked': False,
-            'comments': 0,
-            'created_at': ARBITRARY_CREATED,
-            'updated_at': ARBITRARY_UPDATED,
-            'closed_at': None,
-            'due_date': None,
-            'pull_request': pull_request,
-            'repository': repository,
-            'pin_order': 0,
+            "original_author": "",
+            "original_author_id": 0,
+            "title": "Example issue",
+            "body": "This is the body of the issue",
+            "ref": "",
+            "assets": [],
+            "labels": labels or [],
+            "milestone": None,
+            "assignee": None,
+            "assignees": None,
+            "state": "open",
+            "is_locked": False,
+            "comments": 0,
+            "created_at": ARBITRARY_CREATED,
+            "updated_at": ARBITRARY_UPDATED,
+            "closed_at": None,
+            "due_date": None,
+            "pull_request": pull_request,
+            "repository": repository,
+            "pin_order": 0,
             **kwargs,
         }
     )
@@ -103,12 +106,12 @@ def make_pr(
     *,
     base_issue: ForgejoIssue,
     base_repository: ForgejoRepository,
-    base_branch: Optional[ForgejoPrBranchInfo] = None,
-    head_branch: Optional[ForgejoPrBranchInfo] = None,
+    base_branch: ForgejoPrBranchInfo | None = None,
+    head_branch: ForgejoPrBranchInfo | None = None,
     comments: int = 0,
     mergeable: bool = False,
-    requested_reviewers: Optional[list[ForgejoUser]] = None,
-    requested_reviewers_teams: Optional[list[ForgejoUser]] = None,
+    requested_reviewers: list[ForgejoUser] | None = None,
+    requested_reviewers_teams: list[ForgejoUser] | None = None,
     review_comments: int = 0,
 ) -> ForgejoPullRequest:
     assert base_issue.repository.id == base_repository.id, (
@@ -164,10 +167,10 @@ def make_pr(
 
 
 LABEL_BUG = ForgejoLabel(
-    id=next_id(), name='bug', description='Something is not working', color='ee0701'
+    id=next_id(), name="bug", description="Something is not working", color="ee0701"
 )
 LABEL_ENHANCEMENT = ForgejoLabel(
-    id=next_id(), name='enhancement', description='New feature', color='84b6eb'
+    id=next_id(), name="enhancement", description="New feature", color="84b6eb"
 )
 
 SHARED_ORGANIZATION = ForgejoOrganization(
@@ -178,8 +181,8 @@ SHARED_ORGANIZATION = ForgejoOrganization(
     email="unused",
 )
 
-LOGIN_USER = ForgejoUser(id=next_id(), login='login_user')
-OTHER_USER = ForgejoUser(id=next_id(), login='other_user')
+LOGIN_USER = ForgejoUser(id=next_id(), login="login_user")
+OTHER_USER = ForgejoUser(id=next_id(), login="other_user")
 LOGIN_USER_TEAM = ForgejoTeam(
     id=next_id(),
     name="login team",
@@ -190,7 +193,7 @@ LOGIN_USER_TEAM = ForgejoTeam(
 
 LOGIN_USER_REPO = ForgejoRepository(
     id=next_id(),
-    name='login_user_repo',
+    name="login_user_repo",
     owner=LOGIN_USER,
     full_name=f"{LOGIN_USER.login}/login_user_repo",
     has_issues=True,
@@ -210,7 +213,7 @@ LOGIN_USER_REPO_META = ForgejoRepositoryMeta(
 
 OTHER_USER_REPO = ForgejoRepository(
     id=next_id(),
-    name='login_user_repo',
+    name="login_user_repo",
     owner=OTHER_USER,
     full_name=f"{OTHER_USER.login}/login_user_repo",
     has_issues=True,
@@ -733,7 +736,7 @@ class TestForgejoProcessedIssue:
         assert processed.pr_base_branch == pr.base, "pull request base branch mismatch"
 
     @pytest.mark.parametrize(
-        "expected,issue,comments",
+        ("expected", "issue", "comments"),
         [
             (ASSIGNED_PROCESSED_ISSUE, ASSIGNED_ISSUE, []),
             (CREATED_PROCESSED_ISSUE, CREATED_ISSUE, []),
@@ -754,7 +757,7 @@ class TestForgejoProcessedIssue:
         TestForgejoProcessedIssue.assert_matches_issue(processed, issue, comments)
 
     @pytest.mark.parametrize(
-        "expected,issue,pull_request,issue_comments,review_comments",
+        ("expected", "issue", "pull_request", "issue_comments", "review_comments"),
         [
             (
                 ASSIGNED_PROCESSED_PULL_REQUEST,
@@ -849,192 +852,179 @@ class TestForgejoProcessedIssue:
         )
 
 
-class TestForgejoConfigValidation(ConfigTest):
-    SERVICE_CONFIG = {
-        'service': 'forgejo',
-        'login': 'tintin',
-        'token': 't0ps3cr3t',
-        'host': 'https://codeberg.org',
-    }
-
-    def setUp(self):
-        super().setUp()
-        self.config = {
-            'general': {'targets': ['myservice']},
-            'myservice': {**self.SERVICE_CONFIG, 'login': 'milou'},
+class TestForgejoConfigValidation:
+    @pytest.fixture
+    def config(self):
+        return {
+            "general": {"targets": [SERVICE_NAME]},
+            SERVICE_NAME: {**SERVICE_CONFIG},
         }
 
-    @property
-    def parsed(self) -> ForgejoConfig:
-        return ForgejoConfig(**self.config)
+    def test_host_must_contain_https(self, config, assert_validation_error):
+        config[SERVICE_NAME]["host"] = "codeberg.org"
+        assert_validation_error(config, 'should use the "https" scheme')
+        config[SERVICE_NAME]["host"] = "http://codeberg.org"
+        assert_validation_error(config, 'should use the "https" scheme')
+        config[SERVICE_NAME]["host"] = "https://codeberg.org"
+        validate(config)
 
-    def test_host_must_contain_https(self):
-        self.config['myservice']['host'] = "codeberg.org"
-        self.assertValidationError("should use the \"https\" scheme")
-        self.config['myservice']['host'] = "http://codeberg.org"
-        self.assertValidationError("should use the \"https\" scheme")
-        self.config['myservice']['host'] = "https://codeberg.org"
-        self.validate()
+    def test_host_must_contain_hostname(self, config, assert_validation_error):
+        config[SERVICE_NAME]["host"] = "https:///path/to/file"
+        assert_validation_error(config, "must contain a hostname")
+        config[SERVICE_NAME]["host"] = "https://codeberg.org"
+        validate(config)
 
-    def test_host_must_contain_hostname(self):
-        self.config['myservice']['host'] = "https:///path/to/file"
-        self.assertValidationError("must contain a hostname")
-        self.config['myservice']['host'] = "https://codeberg.org"
-        self.validate()
-
-    def test_repo_cannot_be_in_both_include_and_exclude(self):
-        self.config['myservice']['include_repos'] = "foo/bar, foo/baz"
-        self.config['myservice']['exclude_repos'] = "foo/baz, foo/quux"
-        self.assertValidationError(
-            "one or more repos appear in both include_repos and exclude_repos: {'foo/baz'}"
+    def test_repo_cannot_be_in_both_include_and_exclude(
+        self, config, assert_validation_error
+    ):
+        config[SERVICE_NAME]["include_repos"] = "foo/bar, foo/baz"
+        config[SERVICE_NAME]["exclude_repos"] = "foo/baz, foo/quux"
+        assert_validation_error(
+            config,
+            "one or more repos appear in both include_repos and exclude_repos: {'foo/baz'}",
         )
 
     @pytest.mark.parametrize("field", INCOMPATIBLE_WITH_QUERY)
-    def test_disallow_field_if_query_is_set(self, field: str):
-        self.config['myservice']['query'] = "is:open"
-        self.config['myservice'][field] = True
-        self.assertValidationError("are incompatible with \"query\"")
+    def test_disallow_field_if_query_is_set(
+        self, config, assert_validation_error, field: str
+    ):
+        config[SERVICE_NAME]["query"] = "is:open"
+        config[SERVICE_NAME][field] = True
+        assert_validation_error(config, 'are incompatible with "query"')
 
-    def test_issue_urls_consistent_with_host(self):
-        self.config['myservice']['host'] = "https://codeberg.org"
-        self.config['myservice']['issue_urls'] = (
-            'https://forgejo.example.com/foo/bar/issues/1'
+    def test_issue_urls_consistent_with_host(self, config, assert_validation_error):
+        config[SERVICE_NAME]["host"] = "https://codeberg.org"
+        config[SERVICE_NAME]["issue_urls"] = (
+            "https://forgejo.example.com/foo/bar/issues/1"
         )
-        self.assertValidationError('inconsistent with the configured host')
+        assert_validation_error(config, "inconsistent with the configured host")
 
-    def test_issue_urls_invalid(self):
-        self.config['myservice']['issue_urls'] = (
-            'https://codeberg.org/foo/bar/invalid/1'
-        )
-        self.assertValidationError('is not a valid issue or pull request url')
+    def test_issue_urls_invalid(self, config, assert_validation_error):
+        config[SERVICE_NAME]["issue_urls"] = "https://codeberg.org/foo/bar/invalid/1"
+        assert_validation_error(config, "is not a valid issue or pull request url")
 
-    def test_issue_urls_valid(self):
-        self.config['myservice']['issue_urls'] = (
-            'https://codeberg.org/foo/bar/issues/1, https://codeberg.org/foo/bar/pulls/2'
+    def test_issue_urls_valid(self, config):
+        config[SERVICE_NAME]["issue_urls"] = (
+            "https://codeberg.org/foo/bar/issues/1, https://codeberg.org/foo/bar/pulls/2"
         )
-        self.validate()
+        validate(config)
 
     @pytest.mark.parametrize(
-        "config_name,issue",
+        ("config_name", "issue"),
         [
-            ("include_assigned_issues", ASSIGNED_PROCESSED_ISSUE),
-            ("include_assigned_issues", ASSIGNED_PROCESSED_PULL_REQUEST),
-            ("include_created_issues", CREATED_PROCESSED_ISSUE),
-            ("include_created_issues", CREATED_PROCESSED_PULL_REQUEST),
-            ("include_mentioned_issues", MENTIONED_PROCESSED_ISSUE),
-            ("include_mentioned_issues", MENTIONED_PROCESSED_PULL_REQUEST),
-            ("include_mentioned_issues", MENTIONED_IN_REVIEW_PROCESSED_PULL_REQUEST),
-            ("include_user_repos", USER_REPO_PROCESSED_ISSUE),
-            ("include_user_repos", USER_REPO_PROCESSED_PULL_REQUEST),
-            (
-                "include_review_requested_issues",
-                REVIEW_REQUESTED_PROCESSED_PULL_REQUEST,
-            ),
-            (
-                "include_review_requested_issues",
-                REVIEW_REQUESTED_TEAM_PROCESSED_PULL_REQUEST,
-            ),
-            ("include_reviewed_issues", REVIEWED_PROCESSED_PULL_REQUEST),
+            ("include_assigned_issues", ASSIGNED_ISSUE),
+            ("include_assigned_issues", ASSIGNED_PULL_REQUEST),
+            ("include_created_issues", CREATED_ISSUE),
+            ("include_created_issues", CREATED_PULL_REQUEST),
+            ("include_mentioned_issues", MENTIONED_ISSUE),
+            ("include_mentioned_issues", MENTIONED_PULL_REQUEST),
+            ("include_mentioned_issues", MENTIONED_IN_REVIEW_PULL_REQUEST),
+            ("include_user_repos", USER_REPO_ISSUE),
+            ("include_user_repos", USER_REPO_PULL_REQUEST),
+            ("include_review_requested_issues", REVIEW_REQUESTED_PULL_REQUEST),
+            ("include_review_requested_issues", REVIEW_REQUESTED_TEAM_PULL_REQUEST),
+            ("include_reviewed_issues", REVIEWED_PULL_REQUEST),
         ],
     )
     def test_issue_kept_if_related_config_enabled(
-        self, config_name: str, issue: ForgejoIssue
+        self, config, make_service, config_name: str, issue: ForgejoIssue
     ):
-        self.config["filter_pull_requests"] = True
-        self.config[config_name] = True
-        assert self.parsed.keep_issue(issue), (
+        config[SERVICE_NAME]["filter_pull_requests"] = True
+        config[SERVICE_NAME][config_name] = True
+        assert make_service(**config[SERVICE_NAME]).parsed_config.filter_issue(issue), (
             f"issue should be kept when {config_name} enabled"
         )
-        self.config[config_name] = False
-        assert not self.parsed.keep_issue(issue), (
-            f"issue should not be kept when {config_name} disabled"
-        )
+        config[SERVICE_NAME][config_name] = False
+        assert not make_service(**config[SERVICE_NAME]).parsed_config.filter_issue(
+            issue
+        ), f"issue should not be kept when {config_name} disabled"
 
     @pytest.mark.parametrize(
-        "config_name,issue",
+        ("config_name", "issue"),
         [
-            ("include_assigned_issues", ASSIGNED_PROCESSED_PULL_REQUEST),
-            ("include_created_issues", CREATED_PROCESSED_PULL_REQUEST),
-            ("include_mentioned_issues", MENTIONED_PROCESSED_PULL_REQUEST),
-            ("include_mentioned_issues", MENTIONED_IN_REVIEW_PROCESSED_PULL_REQUEST),
-            ("include_user_repos", USER_REPO_PROCESSED_PULL_REQUEST),
+            ("include_assigned_issues", ASSIGNED_PULL_REQUEST),
+            ("include_created_issues", CREATED_PULL_REQUEST),
+            ("include_mentioned_issues", MENTIONED_PULL_REQUEST),
+            ("include_mentioned_issues", MENTIONED_IN_REVIEW_PULL_REQUEST),
+            ("include_user_repos", USER_REPO_PULL_REQUEST),
             (
                 "include_review_requested_issues",
-                REVIEW_REQUESTED_PROCESSED_PULL_REQUEST,
+                REVIEW_REQUESTED_PULL_REQUEST,
             ),
             (
                 "include_review_requested_issues",
-                REVIEW_REQUESTED_TEAM_PROCESSED_PULL_REQUEST,
+                REVIEW_REQUESTED_TEAM_PULL_REQUEST,
             ),
-            ("include_reviewed_issues", REVIEWED_PROCESSED_PULL_REQUEST),
+            ("include_reviewed_issues", REVIEWED_PULL_REQUEST),
             ("", UNRELATED_PULL_REQUEST),
         ],
     )
     def test_pull_request_kept_if_not_filtered(
-        self, config_name: str, issue: ForgejoIssue
+        self, config, make_service, config_name: str, issue: ForgejoIssue
     ):
         if config_name:
-            self.config[config_name] = False
-        self.config["filter_pull_requests"] = False
-        assert self.parsed.keep_issue(issue), (
+            config[SERVICE_NAME][config_name] = False
+        config[SERVICE_NAME]["filter_pull_requests"] = False
+        assert make_service(**config[SERVICE_NAME]).parsed_config.filter_issue(issue), (
             "pull request should be kept when not filtered"
         )
 
     @pytest.mark.parametrize(
-        "config_name,issue",
+        ("config_name", "issue"),
         [
-            ("include_assigned_issues", ASSIGNED_PROCESSED_PULL_REQUEST),
-            ("include_created_issues", CREATED_PROCESSED_PULL_REQUEST),
-            ("include_mentioned_issues", MENTIONED_PROCESSED_PULL_REQUEST),
-            ("include_mentioned_issues", MENTIONED_IN_REVIEW_PROCESSED_PULL_REQUEST),
-            ("include_user_repos", USER_REPO_PROCESSED_PULL_REQUEST),
+            ("include_assigned_issues", ASSIGNED_PULL_REQUEST),
+            ("include_created_issues", CREATED_PULL_REQUEST),
+            ("include_mentioned_issues", MENTIONED_PULL_REQUEST),
+            ("include_mentioned_issues", MENTIONED_IN_REVIEW_PULL_REQUEST),
+            ("include_user_repos", USER_REPO_PULL_REQUEST),
             (
                 "include_review_requested_issues",
-                REVIEW_REQUESTED_PROCESSED_PULL_REQUEST,
+                REVIEW_REQUESTED_PULL_REQUEST,
             ),
             (
                 "include_review_requested_issues",
-                REVIEW_REQUESTED_TEAM_PROCESSED_PULL_REQUEST,
+                REVIEW_REQUESTED_TEAM_PULL_REQUEST,
             ),
-            ("include_reviewed_issues", REVIEWED_PROCESSED_PULL_REQUEST),
+            ("include_reviewed_issues", REVIEWED_PULL_REQUEST),
         ],
     )
     def test_pull_request_not_kept_if_excluded(
-        self, config_name: str, issue: ForgejoIssue
+        self, config, make_service, config_name: str, issue: ForgejoIssue
     ):
-        self.config[config_name] = True
-        self.config["exclude_pull_requests"] = True
-        assert not self.parsed.keep_issue(issue), (
-            "pull request should not be kept when excluded"
-        )
+        config[SERVICE_NAME][config_name] = True
+        config[SERVICE_NAME]["exclude_pull_requests"] = True
+        assert not make_service(**config[SERVICE_NAME]).parsed_config.filter_issue(
+            issue
+        ), "pull request should not be kept when excluded"
 
     @pytest.mark.parametrize(
         "issue",
         [
-            ASSIGNED_PROCESSED_ISSUE,
-            ASSIGNED_PROCESSED_PULL_REQUEST,
-            CREATED_PROCESSED_ISSUE,
-            CREATED_PROCESSED_PULL_REQUEST,
-            MENTIONED_PROCESSED_ISSUE,
-            MENTIONED_PROCESSED_PULL_REQUEST,
-            MENTIONED_IN_REVIEW_PROCESSED_PULL_REQUEST,
+            ASSIGNED_ISSUE,
+            ASSIGNED_PULL_REQUEST,
+            CREATED_ISSUE,
+            CREATED_PULL_REQUEST,
+            MENTIONED_ISSUE,
+            MENTIONED_PULL_REQUEST,
+            MENTIONED_IN_REVIEW_PULL_REQUEST,
             # TODO: not sure if this counts to Forgejo
-            # USER_REPO_PROCESSED_ISSUE,
-            # USER_REPO_PROCESSED_PULL_REQUEST,
-            REVIEW_REQUESTED_PROCESSED_PULL_REQUEST,
-            REVIEW_REQUESTED_TEAM_PROCESSED_PULL_REQUEST,
-            REVIEWED_PROCESSED_PULL_REQUEST,
+            # USER_REPO_ISSUE,
+            # USER_REPO_PULL_REQUEST,
+            REVIEW_REQUESTED_PULL_REQUEST,
+            REVIEW_REQUESTED_TEAM_PULL_REQUEST,
+            REVIEWED_PULL_REQUEST,
         ],
     )
-    def test_issue_kept_if_involved(self, issue: ForgejoIssue):
-        self.config["filter_pull_requests"] = True
-        config = self.parsed
+    def test_issue_kept_if_involved(self, config, make_service, issue: ForgejoIssue):
+        config[SERVICE_NAME]["filter_pull_requests"] = True
+        config = make_service(**config[SERVICE_NAME]).parsed_config
+
         config.include_involved_issues = False
-        assert not config.keep_issue(issue), (
+        assert not config.filter_issue(issue), (
             "issue should not be kept when not keeping involved issues"
         )
         config.include_involved_issues = True
-        assert config.keep_issue(issue), "involved issue should be kept when enabled"
+        assert config.filter_issue(issue), "involved issue should be kept when enabled"
 
     @pytest.mark.parametrize(
         "config_flag",
@@ -1048,163 +1038,174 @@ class TestForgejoConfigValidation(ConfigTest):
             "include_involved_issues",
         ],
     )
-    def test_unrelated_issue_is_not_kept(self, config_flag: str):
-        self.config[config_flag] = True
-        assert not self.parsed.keep_issue(UNRELATED_PROCESSED_ISSUE), (
-            "unrelated issue should not be kept"
+    def test_unrelated_issue_is_not_kept(self, config, make_service, config_flag: str):
+        config[SERVICE_NAME][config_flag] = True
+        assert not make_service(**config[SERVICE_NAME]).parsed_config.filter_issue(
+            UNRELATED_PROCESSED_ISSUE
+        ), "unrelated issue should not be kept"
+
+    @pytest.mark.parametrize(
+        "issue",
+        [
+            ASSIGNED_ISSUE,
+            ASSIGNED_PULL_REQUEST,
+            CREATED_ISSUE,
+            CREATED_PULL_REQUEST,
+            MENTIONED_ISSUE,
+            MENTIONED_PULL_REQUEST,
+            MENTIONED_IN_REVIEW_PULL_REQUEST,
+            USER_REPO_ISSUE,
+            USER_REPO_PULL_REQUEST,
+            REVIEW_REQUESTED_PULL_REQUEST,
+            REVIEW_REQUESTED_TEAM_PULL_REQUEST,
+            REVIEWED_PULL_REQUEST,
+            UNRELATED_ISSUE,
+            UNRELATED_PULL_REQUEST,
+        ],
+    )
+    def test_included_if_in_issue_urls(
+        self, config, make_service, issue: ForgejoProcessedIssue
+    ):
+        config[SERVICE_NAME]["include_assigned_issues"] = False
+        config[SERVICE_NAME]["include_created_issues"] = False
+        config[SERVICE_NAME]["include_mentioned_issues"] = False
+        config[SERVICE_NAME]["include_user_repos"] = False
+        config[SERVICE_NAME]["include_review_requested_issues"] = False
+        config[SERVICE_NAME]["include_reviewed_issues"] = False
+        config[SERVICE_NAME]["include_involved_issues"] = False
+        # issue_urls takes priority over exclude_pull_requests
+        config[SERVICE_NAME]["exclude_pull_requests"] = True
+        config[SERVICE_NAME]["issue_urls"] = issue.api_url
+        assert make_service(**config[SERVICE_NAME]).parsed_config.filter_issue(issue), (
+            "should keep issue by api url"
+        )
+        config[SERVICE_NAME]["issue_urls"] = issue.html_url
+        assert make_service(**config[SERVICE_NAME]).parsed_config.filter_issue(issue), (
+            "should keep issue by html url"
         )
 
     @pytest.mark.parametrize(
         "issue",
         [
-            ASSIGNED_PROCESSED_ISSUE,
-            ASSIGNED_PROCESSED_PULL_REQUEST,
-            CREATED_PROCESSED_ISSUE,
-            CREATED_PROCESSED_PULL_REQUEST,
-            MENTIONED_PROCESSED_ISSUE,
-            MENTIONED_PROCESSED_PULL_REQUEST,
-            MENTIONED_IN_REVIEW_PROCESSED_PULL_REQUEST,
-            USER_REPO_PROCESSED_ISSUE,
-            USER_REPO_PROCESSED_PULL_REQUEST,
-            REVIEW_REQUESTED_PROCESSED_PULL_REQUEST,
-            REVIEW_REQUESTED_TEAM_PROCESSED_PULL_REQUEST,
-            REVIEWED_PROCESSED_PULL_REQUEST,
-            UNRELATED_PROCESSED_ISSUE,
-            UNRELATED_PROCESSED_PULL_REQUEST,
+            ASSIGNED_ISSUE,
+            ASSIGNED_PULL_REQUEST,
+            CREATED_ISSUE,
+            CREATED_PULL_REQUEST,
+            MENTIONED_ISSUE,
+            MENTIONED_PULL_REQUEST,
+            MENTIONED_IN_REVIEW_PULL_REQUEST,
+            USER_REPO_ISSUE,
+            USER_REPO_PULL_REQUEST,
+            REVIEW_REQUESTED_PULL_REQUEST,
+            REVIEW_REQUESTED_TEAM_PULL_REQUEST,
+            REVIEWED_PULL_REQUEST,
+            UNRELATED_ISSUE,
+            UNRELATED_PULL_REQUEST,
         ],
     )
-    def test_included_if_in_issue_urls(self, issue: ForgejoProcessedIssue):
-        self.config["include_assigned_issues"] = False
-        self.config["include_created_issues"] = False
-        self.config["include_mentioned_issues"] = False
-        self.config["include_user_repos"] = False
-        self.config["include_review_requested_issues"] = False
-        self.config["include_reviewed_issues"] = False
-        self.config["include_involved_issues"] = False
-        # issue_urls takes priority over exclude_pull_requests
-        self.config["exclude_pull_requests"] = True
-        self.config["issue_urls"] = issue.api_url
-        assert self.parsed.keep_issue(issue), "should keep issue by api url"
-        self.config["issue_urls"] = issue.html_url
-        assert self.parsed.keep_issue(issue), "should keep issue by html url"
-
-    @pytest.mark.parametrize(
-        "issue",
-        [
-            ASSIGNED_PROCESSED_ISSUE,
-            ASSIGNED_PROCESSED_PULL_REQUEST,
-            CREATED_PROCESSED_ISSUE,
-            CREATED_PROCESSED_PULL_REQUEST,
-            MENTIONED_PROCESSED_ISSUE,
-            MENTIONED_PROCESSED_PULL_REQUEST,
-            MENTIONED_IN_REVIEW_PROCESSED_PULL_REQUEST,
-            USER_REPO_PROCESSED_ISSUE,
-            USER_REPO_PROCESSED_PULL_REQUEST,
-            REVIEW_REQUESTED_PROCESSED_PULL_REQUEST,
-            REVIEW_REQUESTED_TEAM_PROCESSED_PULL_REQUEST,
-            REVIEWED_PROCESSED_PULL_REQUEST,
-            UNRELATED_PROCESSED_ISSUE,
-            UNRELATED_PROCESSED_PULL_REQUEST,
-        ],
-    )
-    def test_included_if_in_include_repos(self, issue: ForgejoProcessedIssue):
-        self.config["include_assigned_issues"] = False
-        self.config["include_created_issues"] = False
-        self.config["include_mentioned_issues"] = False
-        self.config["include_user_repos"] = False
-        self.config["include_review_requested_issues"] = False
-        self.config["include_reviewed_issues"] = False
-        self.config["include_involved_issues"] = False
-        self.config["filter_pull_requests"] = True
-        self.config["include_repos"] = issue.repository.full_name
-        assert self.parsed.keep_issue(issue), (
+    def test_included_if_in_include_repos(
+        self, config, make_service, issue: ForgejoProcessedIssue
+    ):
+        config[SERVICE_NAME]["include_assigned_issues"] = False
+        config[SERVICE_NAME]["include_created_issues"] = False
+        config[SERVICE_NAME]["include_mentioned_issues"] = False
+        config[SERVICE_NAME]["include_user_repos"] = False
+        config[SERVICE_NAME]["include_review_requested_issues"] = False
+        config[SERVICE_NAME]["include_reviewed_issues"] = False
+        config[SERVICE_NAME]["include_involved_issues"] = False
+        config[SERVICE_NAME]["filter_pull_requests"] = True
+        config[SERVICE_NAME]["include_repos"] = issue.repository.full_name
+        assert make_service(**config[SERVICE_NAME]).parsed_config.filter_issue(issue), (
             "issue should be kept when repo is included"
         )
 
     @pytest.mark.parametrize(
         "issue",
         [
-            ASSIGNED_PROCESSED_PULL_REQUEST,
-            CREATED_PROCESSED_PULL_REQUEST,
-            MENTIONED_PROCESSED_PULL_REQUEST,
-            MENTIONED_IN_REVIEW_PROCESSED_PULL_REQUEST,
-            USER_REPO_PROCESSED_PULL_REQUEST,
-            REVIEW_REQUESTED_PROCESSED_PULL_REQUEST,
-            REVIEW_REQUESTED_TEAM_PROCESSED_PULL_REQUEST,
-            REVIEWED_PROCESSED_PULL_REQUEST,
-            UNRELATED_PROCESSED_PULL_REQUEST,
+            ASSIGNED_PULL_REQUEST,
+            CREATED_PULL_REQUEST,
+            MENTIONED_PULL_REQUEST,
+            MENTIONED_IN_REVIEW_PULL_REQUEST,
+            USER_REPO_PULL_REQUEST,
+            REVIEW_REQUESTED_PULL_REQUEST,
+            REVIEW_REQUESTED_TEAM_PULL_REQUEST,
+            REVIEWED_PULL_REQUEST,
+            UNRELATED_PULL_REQUEST,
         ],
     )
     def test_exclude_pull_requests_from_include_repos(
-        self, issue: ForgejoProcessedIssue
+        self, config, make_service, issue: ForgejoProcessedIssue
     ):
-        self.config["include_assigned_issues"] = True
-        self.config["include_created_issues"] = True
-        self.config["include_mentioned_issues"] = True
-        self.config["include_user_repos"] = True
-        self.config["include_review_requested_issues"] = True
-        self.config["include_reviewed_issues"] = True
-        self.config["include_involved_issues"] = True
-        self.config["exclude_pull_requests"] = True
-        self.config["include_repos"] = issue.repository.full_name
-        assert not self.parsed.keep_issue(issue), (
-            "pull request should be excluded even when repo is included"
-        )
+        config[SERVICE_NAME]["include_assigned_issues"] = True
+        config[SERVICE_NAME]["include_created_issues"] = True
+        config[SERVICE_NAME]["include_mentioned_issues"] = True
+        config[SERVICE_NAME]["include_user_repos"] = True
+        config[SERVICE_NAME]["include_review_requested_issues"] = True
+        config[SERVICE_NAME]["include_reviewed_issues"] = True
+        config[SERVICE_NAME]["include_involved_issues"] = True
+        config[SERVICE_NAME]["exclude_pull_requests"] = True
+        config[SERVICE_NAME]["include_repos"] = issue.repository.full_name
+        assert not make_service(**config[SERVICE_NAME]).parsed_config.filter_issue(
+            issue
+        ), "pull request should be excluded even when repo is included"
 
     @pytest.mark.parametrize(
         "issue",
         [
-            ASSIGNED_PROCESSED_PULL_REQUEST,
-            CREATED_PROCESSED_PULL_REQUEST,
-            MENTIONED_PROCESSED_PULL_REQUEST,
-            MENTIONED_IN_REVIEW_PROCESSED_PULL_REQUEST,
-            USER_REPO_PROCESSED_PULL_REQUEST,
-            REVIEW_REQUESTED_PROCESSED_PULL_REQUEST,
-            REVIEW_REQUESTED_TEAM_PROCESSED_PULL_REQUEST,
-            REVIEWED_PROCESSED_PULL_REQUEST,
-            UNRELATED_PROCESSED_PULL_REQUEST,
+            ASSIGNED_PULL_REQUEST,
+            CREATED_PULL_REQUEST,
+            MENTIONED_PULL_REQUEST,
+            MENTIONED_IN_REVIEW_PULL_REQUEST,
+            USER_REPO_PULL_REQUEST,
+            REVIEW_REQUESTED_PULL_REQUEST,
+            REVIEW_REQUESTED_TEAM_PULL_REQUEST,
+            REVIEWED_PULL_REQUEST,
+            UNRELATED_PULL_REQUEST,
         ],
     )
     def test_exclude_repos_overrides_category_includes(
-        self, issue: ForgejoProcessedIssue
+        self, config, make_service, issue: ForgejoProcessedIssue
     ):
-        self.config["include_assigned_issues"] = True
-        self.config["include_created_issues"] = True
-        self.config["include_mentioned_issues"] = True
-        self.config["include_user_repos"] = True
-        self.config["include_review_requested_issues"] = True
-        self.config["include_reviewed_issues"] = True
-        self.config["include_involved_issues"] = True
-        self.config["exclude_repos"] = issue.repository.full_name
-        assert not self.parsed.keep_issue(issue), (
-            "issue should be excluded when repo is excluded"
-        )
+        config[SERVICE_NAME]["include_assigned_issues"] = True
+        config[SERVICE_NAME]["include_created_issues"] = True
+        config[SERVICE_NAME]["include_mentioned_issues"] = True
+        config[SERVICE_NAME]["include_user_repos"] = True
+        config[SERVICE_NAME]["include_review_requested_issues"] = True
+        config[SERVICE_NAME]["include_reviewed_issues"] = True
+        config[SERVICE_NAME]["include_involved_issues"] = True
+        config[SERVICE_NAME]["exclude_repos"] = issue.repository.full_name
+        assert not make_service(**config[SERVICE_NAME]).parsed_config.filter_issue(
+            issue
+        ), "issue should be excluded when repo is excluded"
 
     @pytest.mark.parametrize(
         "issue",
         [
-            ASSIGNED_PROCESSED_PULL_REQUEST,
-            CREATED_PROCESSED_PULL_REQUEST,
-            MENTIONED_PROCESSED_PULL_REQUEST,
-            MENTIONED_IN_REVIEW_PROCESSED_PULL_REQUEST,
-            USER_REPO_PROCESSED_PULL_REQUEST,
-            REVIEW_REQUESTED_PROCESSED_PULL_REQUEST,
-            REVIEW_REQUESTED_TEAM_PROCESSED_PULL_REQUEST,
-            REVIEWED_PROCESSED_PULL_REQUEST,
-            UNRELATED_PROCESSED_PULL_REQUEST,
+            ASSIGNED_PULL_REQUEST,
+            CREATED_PULL_REQUEST,
+            MENTIONED_PULL_REQUEST,
+            MENTIONED_IN_REVIEW_PULL_REQUEST,
+            USER_REPO_PULL_REQUEST,
+            REVIEW_REQUESTED_PULL_REQUEST,
+            REVIEW_REQUESTED_TEAM_PULL_REQUEST,
+            REVIEWED_PULL_REQUEST,
+            UNRELATED_PULL_REQUEST,
         ],
     )
-    def test_issue_urls_overrides_exclude_repos(self, issue: ForgejoProcessedIssue):
-        self.config["include_assigned_issues"] = True
-        self.config["include_created_issues"] = True
-        self.config["include_mentioned_issues"] = True
-        self.config["include_user_repos"] = True
-        self.config["include_review_requested_issues"] = True
-        self.config["include_reviewed_issues"] = True
-        self.config["include_involved_issues"] = True
-        self.config["exclude_repos"] = issue.repository.full_name
-        self.config["issue_urls"] = issue.repository.api_url
-        assert self.parsed.keep_issue(issue), (
+    def test_issue_urls_overrides_exclude_repos(
+        self, config, make_service, issue: ForgejoProcessedIssue
+    ):
+        config[SERVICE_NAME]["include_assigned_issues"] = True
+        config[SERVICE_NAME]["include_created_issues"] = True
+        config[SERVICE_NAME]["include_mentioned_issues"] = True
+        config[SERVICE_NAME]["include_user_repos"] = True
+        config[SERVICE_NAME]["include_review_requested_issues"] = True
+        config[SERVICE_NAME]["include_reviewed_issues"] = True
+        config[SERVICE_NAME]["include_involved_issues"] = True
+        config[SERVICE_NAME]["exclude_repos"] = issue.repository.full_name
+        config[SERVICE_NAME]["issue_urls"] = issue.api_url
+
+        assert make_service(**config[SERVICE_NAME]).parsed_config.filter_issue(issue), (
             "issue should be included by url even when repo is excluded"
         )
 
@@ -1220,18 +1221,18 @@ class TestForgejoClient:
         repo_2.full_name += "_foo"
 
         responses.get(
-            url=f'https://forgejo.internal/api/v1/users/{username}/repos',
+            url=f"https://forgejo.internal/api/v1/users/{username}/repos",
             json=[repo_1.model_dump(mode="json")],
             headers={
-                "link": f"<https://forgejo.internal/api/v1/users/{username}/repos?page=2>; rel=\"next\"",
+                "link": f'<https://forgejo.internal/api/v1/users/{username}/repos?page=2>; rel="next"',
                 "x-total-count": "2",
             },
         )
         responses.get(
-            url=f'https://forgejo.internal/api/v1/users/{username}/repos?page=2',
+            url=f"https://forgejo.internal/api/v1/users/{username}/repos?page=2",
             json=[repo_2.model_dump(mode="json")],
             headers={
-                "link": f"<https://forgejo.internal/api/v1/users/{username}/repos?page=1>; rel=\"first\"",
+                "link": f'<https://forgejo.internal/api/v1/users/{username}/repos?page=1>; rel="first"',
                 "x-total-count": "2",
             },
         )
@@ -1249,22 +1250,22 @@ class TestForgejoClient:
         pr_2 = USER_REPO_PULL_ISSUE
 
         responses.get(
-            url=f'https://forgejo.internal/api/v1/search/issues?q={q}',
+            url=f"https://forgejo.internal/api/v1/search/issues?q={q}",
             json=[
                 issue_1.model_dump(mode="json"),
                 pr_1.model_dump(mode="json"),
                 issue_2.model_dump(mode="json"),
             ],
             headers={
-                "link": f"<https://forgejo.internal/api/v1/search/issues?query={q}&page=2>; rel=\"next\"",
+                "link": f'<https://forgejo.internal/api/v1/search/issues?query={q}&page=2>; rel="next"',
                 "x-total-count": "4",
             },
         )
         responses.get(
-            url=f'https://forgejo.internal/api/v1/search/issues?query={q}&page=2',
+            url=f"https://forgejo.internal/api/v1/search/issues?query={q}&page=2",
             json=[pr_2.model_dump(mode="json")],
             headers={
-                "link": f"<https://forgejo.internal/api/v1/search/issues?query={q}&page=1>; rel=\"first\"",
+                "link": f'<https://forgejo.internal/api/v1/search/issues?query={q}&page=1>; rel="first"',
                 "x-total-count": "4",
             },
         )
@@ -1288,25 +1289,19 @@ class TestForgejoClient:
         pass
 
 
-class TestForgejoIssueImpl(ServiceIssueTest):
+class TestForgejoIssueImpl:
     def test_to_taskwarrior(self):
         pass
 
 
-class TestForgejoService(ServiceTest):
-    SERVICE_CONFIG = {
-        'service': 'forgejo',
-        'login': 'tintin',
-        'host': 'https://codeberg.org',
-        'token': 't0ps3cr3t',
-    }
-
+class TestForgejoService:
     @pytest.mark.parametrize("login", ["tintin", "user"])
     @pytest.mark.parametrize(
         "host", ["https://codeberg.org", "https://forgejo.example.com"]
     )
     def test_get_keyring_service(self, login: str, host: str):
-        config = self.SERVICE_CONFIG
+        # TODO: use make_service fixture
+        config = SERVICE_CONFIG
         config["login"] = login
         config["host"] = host
         service = ForgejoService(**config, target="myservice")
